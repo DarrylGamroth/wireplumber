@@ -82,7 +82,7 @@ end
 function connections.new (spec, expected_pids, lost, core_owner)
   local catalog = { spec = spec, expected_pids = expected_pids,
     nodes = {}, ports = {}, clients = {}, factories = {}, links = {},
-    captured = {}, lost = lost, core_nodes = {} }
+    captured = {}, link_identities = {}, lost = lost, core_nodes = {} }
   if core_owner then
     local identity = remote_core_identity ()
     assert (math.type (core_owner.pid) == "integer" and core_owner.pid > 0 and
@@ -99,16 +99,36 @@ function connections.new (spec, expected_pids, lost, core_owner)
       client = catalog.clients, factory = catalog.factories, link = catalog.links }) do
     local manager = ObjectManager ({ Interest { type = kind } }, INFO)
     manager:connect ("object-added", function (_, object)
-      objects [object ["bound-id"]] = object
+      local id = object ["bound-id"]
+      objects [id] = object
+      if kind == "link" then catalog.link_identities [id] = control.identity (object) end
       if catalog.waiting then catalog.waiting () end
     end)
     manager:connect ("object-removed", function (_, object)
       -- Signal arguments have fresh userdata wrappers. GObject equality works
       -- through ==; table indexing does not. The live bound ID may be invalid.
+      local removed, required
       for id, retained in pairs (objects) do
-        if retained == object then objects [id] = nil; break end
+        if retained == object then
+          if kind == "link" then
+            removed = catalog.link_identities [id]
+            catalog.link_identities [id] = nil
+          end
+          objects [id] = nil
+          break
+        end
       end
-      local required
+      -- Created Links and ObjectManager Links use distinct native proxies.
+      -- Correlate the saved registry incarnation with the admitted cohort;
+      -- neither proxy's live properties are reliable during removal.
+      local cohort = catalog.cohort
+      if removed and cohort and not cohort.terminal then
+        local identity = cohort.ids [removed.global_id]
+        if identity and same (removed, identity) then
+          required = cohort.captured [removed.global_id]
+          cohort.captured [removed.global_id] = nil
+        end
+      end
       for captured, identity in pairs (catalog.captured) do
         if captured == object then
           catalog.captured [captured] = nil
@@ -448,7 +468,7 @@ end
 function connections.realize (catalog, rows, generation, deadline, callback)
   assert (not catalog.cohort and not catalog.withdrawing, "Old connection cohort remains")
   local order = downstream_order (rows)
-  local cohort = { proxies = {}, ids = {}, pending = 0, terminal = false,
+  local cohort = { proxies = {}, ids = {}, captured = {}, pending = 0, terminal = false,
     generation = generation, path = "pipewireao/session/" .. generation .. "/" }
   catalog.cohort = cohort
   local finish, done, cancel = bounded (deadline, callback)
@@ -505,7 +525,7 @@ function connections.realize (catalog, rows, generation, deadline, callback)
       if advanced then return end
       local identity = control.identity (link)
       cohort.ids [identity.global_id] = identity
-      catalog.captured [link] = saved_identity (link, "link", "link", row.output, row.input)
+      cohort.captured [identity.global_id] = saved_identity (link, "link", "link", row.output, row.input)
       advanced = true
       next_link (index + 1)
     end

@@ -297,8 +297,9 @@ local function discover (catalog)
   return result, failure
 end
 
--- An admitted link's diagnostic retains its endpoint IDs after proxy removal.
-do
+-- Create independent creator and registry proxies, as the native Link factory does.
+local function realized_link (options)
+  options = options or {}
   local catalog = discovery_session ()
   local rows, err = discover (catalog)
   assert (rows and not err, "Discovery failed before link test: " .. tostring (err))
@@ -315,7 +316,7 @@ do
     schema = "x", layout = "ROW_MAJOR", shape = { pod_type = "Array",
       value_type = "Spa:Int", 1 },
   } } end } end }
-  local link
+  local link, registry, activate
   test_env.Link = function (_, props)
     local copied = {}
     for key, value in pairs (props) do copied [key] = tostring (value) end
@@ -324,7 +325,13 @@ do
     link = object (100, "70000", copied)
     link.state = "paused"
     link.get_format = function () return format end
-    link.activate = function (self, _, callback) callback (self, nil) end
+    registry = object (100, "70000", copied)
+    if options.alias then registry = link end
+    link.activate = function (self, _, callback)
+      if options.add_before then add (catalog, "link", registry) end
+      activate = function () callback (self, nil) end
+      if not options.pending then activate () end
+    end
     link.deactivate = function () end
     return link
   end
@@ -334,17 +341,99 @@ do
   end)
   Core.get_own_bound_id = saved_get_own_bound_id
   test_env.Pod, test_env.Link = nil, nil
-  assert (result and not failure and link, "Link realization failed: " .. tostring (failure))
-  add (catalog, "link", link)
-  link.properties, link ["bound-id"] = {}, nil
-  catalog.managers.link:emit ("object-removed", link)
+  assert (link and not failure and (result or options.pending),
+      "Link realization failed: " .. tostring (failure))
+  if not options.add_before then add (catalog, "link", registry) end
+  return catalog, link, registry, activate
+end
+
+local function assert_link_loss ()
   assert (#catalog_losses == 1 and catalog_losses [1]:find ('kind="link"', 1, true) and
       catalog_losses [1]:find ('role="link"', 1, true) and
+      catalog_losses [1]:find ('id=100', 1, true) and
+      catalog_losses [1]:find ('serial="70000"', 1, true) and
       catalog_losses [1]:find ('output_node="70"', 1, true) and
       catalog_losses [1]:find ('output_port="71"', 1, true) and
       catalog_losses [1]:find ('input_node="80"', 1, true) and
       catalog_losses [1]:find ('input_port="81"', 1, true),
       "Link removal did not retain saved identity: " .. tostring (catalog_losses [1]))
+end
+
+-- Registry discovery may precede or follow creator activation. Removal keeps
+-- the exact admitted identity even when live properties and bound ID vanish.
+for _, options in ipairs ({ {}, { add_before = true }, { alias = true } }) do
+  local catalog, creator, registry = realized_link (options)
+  creator.properties, creator ["bound-id"] = {}, nil
+  registry.properties, registry ["bound-id"] = {}, nil
+  catalog.managers.link:emit ("object-removed", registry)
+  assert (catalog.links [100] == nil, "Removed Link remained in the registry map")
+  assert_link_loss ()
+  catalog.managers.link:emit ("object-removed", registry)
+  assert (#catalog_losses == 1, "Repeated registry removal faulted twice")
+end
+
+-- GObject signal arguments have distinct Lua wrappers but compare equal.
+do
+  local catalog, _, registry = realized_link ()
+  local registry_equality = { __eq = function (a, b)
+    return a.registry_token ~= nil and a.registry_token == b.registry_token
+  end }
+  registry.registry_token = {}
+  setmetatable (registry, registry_equality)
+  local removed = setmetatable ({ registry_token = registry.registry_token }, registry_equality)
+  registry.properties, registry ["bound-id"] = {}, nil
+  catalog.managers.link:emit ("object-removed", removed)
+  assert (catalog.links [100] == nil, "Fresh removal wrapper retained the Link")
+  assert_link_loss ()
+end
+
+-- Unrelated and reused IDs cannot inherit a required Link incarnation.
+do
+  local catalog, _, registry = realized_link ()
+  local unrelated = object (101, "70000", { ["object.serial"] = "70000" })
+  add (catalog, "link", unrelated)
+  catalog.managers.link:emit ("object-removed", unrelated)
+  assert (#catalog_losses == 0, "Unrelated Link removal faulted")
+
+  local replacement = object (100, "70001", { ["object.serial"] = "70001" })
+  add (catalog, "link", replacement)
+  registry.properties, registry ["bound-id"] = {}, nil
+  catalog.managers.link:emit ("object-removed", registry)
+  assert (catalog.links [100] == replacement and #catalog_losses == 0,
+      "Stale removal affected the replacement Link")
+  replacement.properties, replacement ["bound-id"] = {}, nil
+  catalog.managers.link:emit ("object-removed", replacement)
+  assert (catalog.links [100] == nil and #catalog_losses == 0,
+      "Reused Link ID inherited the admitted serial")
+end
+
+-- Deliberate withdrawal suppresses removal and creator failures, including a
+-- late activation completion while withdrawal is waiting for pending creation.
+for _, pending in ipairs ({ false, true }) do
+  local catalog, link, registry, activate = realized_link ({ add_before = true, pending = pending })
+  local removed = false
+  link.deactivate = function ()
+    if not removed then
+      removed = true
+      registry.properties, registry ["bound-id"] = {}, nil
+      catalog.managers.link:emit ("object-removed", registry)
+      link:emit ("pw-proxy-destroyed")
+      link:emit ("state-changed", "paused", "unlinked")
+    end
+  end
+  local saved_sync = Core.sync
+  Core.sync = function (callback) callback (nil) end
+  local completed, failure
+  connections.withdraw (catalog, 1000000, function (value, error)
+    completed, failure = value, error
+  end)
+  if pending then
+    assert (not completed, "Withdrawal completed before pending activation")
+    activate ()
+  end
+  Core.sync = saved_sync
+  assert (completed and not failure and not catalog.cohort and #catalog_losses == 0,
+      "Intentional withdrawal faulted or failed: " .. tostring (failure))
 end
 
 local function resolved_catalog ()
