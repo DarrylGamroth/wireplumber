@@ -4,7 +4,10 @@ This directory is a small build recipe around upstream WirePlumber. The tracked
 runtime source at the repository root matches `upstream-revision` exactly:
 `bdc17eb2c419cbe41dbb248cf20cbe93370ee2f7` (WirePlumber 0.5.18 plus upstream
 role-policy fixes). The repository remains an ordinary Git fork for upstream
-patch development. The `docs/AO_*` reviews describe historical experiments;
+patch development under the name **WirePlumber** at
+<https://github.com/DarrylGamroth/WirePlumber>. Its upstream is
+<https://gitlab.freedesktop.org/pipewire/wireplumber>. The `docs/AO_*` reviews
+describe historical experiments;
 they do not define the current runtime or its configuration.
 
 The default source overlay changes only the two Meson pkg-config dependency
