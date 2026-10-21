@@ -192,7 +192,8 @@ fault = function (reason)
     connections.withdraw (catalog, deadline, function (_, error)
       if error then Log.warning ("AO session cleanup uncertain: " .. tostring (error)) end
       if previous and previous.ticket and api.pending == previous.ticket then
-        pcall (ingress.complete, api, previous.ticket, 0, nil, tostring (reason))
+        pcall (ingress.complete, api, previous.ticket, 0, nil, tostring (reason),
+            previous.effects_issued)
       end
     end)
   end
@@ -627,7 +628,8 @@ api = ingress.new (endpoint, instance, function (ticket)
       else operation_error (state.operation, error) end
     else ingress.complete (api, ticket, 0, nil, tostring (error)) end
   end
-end, fault)
+end, fault, args ["journal.plugin"] and assert (Plugin.find (args ["journal.plugin"]),
+    "Configured session journal plugin is unavailable") or nil, args ["session.uuid"])
 state.lifecycle = 2
 publish ()
 

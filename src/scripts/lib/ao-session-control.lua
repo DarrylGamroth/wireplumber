@@ -69,24 +69,93 @@ function server.check_ticket (self, ticket)
   error ("Session controller disappeared or changed")
 end
 
-function server.complete (self, ticket, outcome, details, error)
+-- append is admission-only; all I/O and completion delivery belong to the
+-- journal plugin. A zero job id is a bounded queue/configuration rejection.
+local function journal_append (self, ticket, event, record, callback)
+  local ok, id = pcall (self.journal.call, self.journal, "append", self.session_id,
+      event, record, ticket.client_name, ticket.client_pid, ticket.operation_key)
+  if not ok or not id or id <= 0 then
+    callback (false, ok and "Journal admission rejected" or tostring (id))
+    return
+  end
+  self.journal_jobs [id] = callback
+end
+
+local function terminal (self, ticket, record)
+  if self.pending ~= ticket then return end
+  self.pending, self.terminal = nil, ticket
+  if ticket.expiry then ticket.expiry:destroy () end
+  self.completion = record
+  server.publish (self)
+end
+
+local function failure_record (self, ticket, message)
+  return control.encode ("completion", reply_header (self, ticket.header, -5),
+      Pod.Struct { "session", message, Pod.Id (self.lifecycle) })
+end
+
+-- Deadline/disappearance can race either durable append. Fence the ticket
+-- before any late worker callback, and never dispatch an expired request.
+local function cancel_journal_ticket (self, ticket, message)
+  if self.pending ~= ticket then return end
+  ticket.finishing = true
+  local unknown = ticket.dispatched == true
+  local record = failure_record (self, ticket, message)
+  terminal (self, ticket, record)
+  -- Best effort terminal evidence, ordered after the original append. Failure
+  -- leaves a requested record unresolved; there is deliberately no replay.
+  journal_append (self, ticket, unknown and "unknown" or "completed", record,
+      function () end)
+  if unknown then self.fault (message) end
+end
+
+function server.complete (self, ticket, outcome, details, error, uncertain)
   assert (self.pending == ticket, "Superseded public session operation")
+  if ticket.finishing then return end -- exactly one terminal append per attempt
+  if ticket.journaled and uncertain then
+    -- Fault cleanup can hold/withdraw the graph but cannot establish whether an
+    -- already-issued scientific update was adopted or undo that update.
+    ticket.unknown = true
+    error = tostring (error or "Scientific operation outcome unavailable")
+    if not error:find ("effect outcome unknown", 1, true) then
+      error = error .. "; effect outcome unknown"
+    end
+  end
   if not error then
     local valid, reason = pcall (server.check_ticket, self, ticket)
     if not valid then
       error = tostring (reason)
+      if ticket.journaled then
+        ticket.unknown = true
+        error = error .. "; effect outcome unknown"
+      end
       self.fault (error)
       if self.pending ~= ticket then return end
     end
   end
-  self.pending = nil
-  self.terminal = ticket
-  if ticket.expiry then ticket.expiry:destroy () end
   local payload = error and Pod.Struct { "session", error, Pod.Id (self.lifecycle) } or
       Pod.Struct { Pod.Id (self.lifecycle), Pod.Id (outcome), details }
-  self.completion = control.encode ("completion", reply_header (self, ticket.header,
+  local record = control.encode ("completion", reply_header (self, ticket.header,
       error and -5 or 0), payload)
-  server.publish (self)
+  if not ticket.journaled then
+    terminal (self, ticket, record)
+    return
+  end
+  ticket.finishing = true
+  journal_append (self, ticket, ticket.unknown and "unknown" or "completed", record,
+      function (ok, reason)
+    if self.pending ~= ticket then return end
+    if Core.get_monotonic_time () >= ticket.deadline then
+      cancel_journal_ticket (self, ticket, "Session operation expired; effect outcome unknown")
+    elseif ok then terminal (self, ticket, record)
+    else
+      -- A completed scientific effect cannot be rolled back by a storage
+      -- failure. Expose uncertainty and never automatically repeat the effect.
+      terminal (self, ticket, failure_record (self, ticket,
+          "Journal persistence failed; effect outcome unknown: " .. tostring (reason)))
+      self.fault ("Journal persistence failed after dispatch; effect outcome unknown")
+    end
+  end)
 end
 
 function server.complete_admin (self, ticket, lifecycle, warmed)
@@ -163,27 +232,77 @@ local function request (self, pod, received_us)
   if Core.get_monotonic_time () >= deadline then
     server.reject (self, header, -110, "Request budget expired in transport handoff"); return
   end
-  local ticket = { header = header, payload = payload, deadline = deadline }
+  local journaled = self.journal and (header.operation == 13 or header.operation == 14)
+  if journaled then
+    local shape = pcall (control.fields, payload, header.operation == 13 and 2 or 6)
+    if not shape then
+      server.reject (self, header, -22, "Invalid session command fields"); return
+    end
+  end
+  local ticket = { header = header, payload = payload, deadline = deadline,
+    journaled = journaled, client_name = controller.name, client_pid = controller.pid,
+    operation_key = journaled and table.concat ({ self.session_id, tostring (header.endpoint),
+      tostring (header.global_id), tostring (header.serial), tostring (header.instance),
+      tostring (header.token) }, ":") or nil }
   self.last_token, self.pending = header.token, ticket
   ticket.expiry = Core.timeout_add (math.max (1, math.ceil (
       (deadline - Core.get_monotonic_time ()) / 1000)), function ()
     if self.pending ~= ticket then return false end
+    if ticket.journaled then
+      cancel_journal_ticket (self, ticket, ticket.dispatched and
+          "Session operation expired; effect outcome unknown" or
+          "Session request expired before dispatch; no scientific effect issued")
+      return false
+    end
     self.fault ("Public session operation expired; effect outcome unknown")
     if self.pending == ticket then
       server.complete (self, ticket, 0, nil, "Session operation expired; effect outcome unknown")
     end
     return false
   end)
-  local applied, error = pcall (self.request, ticket)
-  if not applied then
-    self.fault ("Session handler failed: " .. tostring (error))
-    if self.pending == ticket then server.complete (self, ticket, 0, nil, tostring (error)) end
+  local function dispatch ()
+    if self.pending ~= ticket or ticket.finishing then return end
+    local valid, reason = true, nil
+    if ticket.journaled then valid, reason = pcall (server.check_ticket, self, ticket) end
+    if not valid then
+      cancel_journal_ticket (self, ticket,
+          "Session request cancelled before dispatch: " .. tostring (reason))
+      return
+    end
+    ticket.dispatched = true
+    local applied, error = pcall (self.request, ticket)
+    if not applied then
+      self.fault ("Session handler failed: " .. tostring (error))
+      if self.pending == ticket then server.complete (self, ticket, 0, nil, tostring (error)) end
+    end
   end
+  if journaled then
+    -- Preserve the entire v1 request envelope, including both incarnations,
+    -- token, operation, deadline budget, and the exact typed input payload.
+    journal_append (self, ticket, "requested", pod, function (ok, reason)
+      if self.pending ~= ticket or ticket.finishing then return end
+      if not ok then
+        terminal (self, ticket, failure_record (self, ticket,
+            "Journal failed before dispatch; no scientific effect issued: " .. tostring (reason)))
+        return -- a storage failure cannot fault a healthy scientific session
+      end
+      dispatch ()
+    end)
+  else dispatch () end
 end
 
-function server.new (endpoint, instance, request_handler, fault_handler)
+function server.new (endpoint, instance, request_handler, fault_handler, journal, session_id)
   local self = { endpoint = endpoint, instance = instance, request = request_handler,
-    fault = fault_handler, lifecycle = 1, last_token = 0, controllers = {} }
+    fault = fault_handler, lifecycle = 1, last_token = 0, controllers = {},
+    journal = journal, session_id = session_id, journal_jobs = {} }
+  if journal then
+    assert (type (session_id) == "string" and #session_id > 0, "Journal requires session.uuid")
+    journal:connect ("completed", function (_, id, ok, reason)
+      local callback = self.journal_jobs [id]
+      self.journal_jobs [id] = nil
+      if callback then callback (ok, reason) end
+    end)
+  end
   self.completion = control.encode ("completion", reply_header (self, nil, 0), Pod.Struct {})
   self.rejection = control.encode ("rejection", reply_header (self, nil, -11),
       Pod.Struct { "session", "No rejected request", Pod.Id (self.lifecycle) })
@@ -199,6 +318,10 @@ function server.new (endpoint, instance, request_handler, fault_handler)
       if not valid or not identity_equal (row, fresh) or fresh.pid ~= row.pid or
           fresh.name ~= row.name then
         row.retired = true
+        if self.pending and self.pending.journaled and not self.pending.dispatched and
+            identity_equal (row, self.pending.header) then
+          cancel_journal_ticket (self, self.pending, "Session controller changed before dispatch")
+        end
         server.publish (self)
       end
     end
@@ -213,6 +336,12 @@ function server.new (endpoint, instance, request_handler, fault_handler)
       if row.node ~= node then remaining [#remaining + 1] = row end
     end
     self.controllers = remaining
+    if self.pending and self.pending.journaled and not self.pending.dispatched then
+      local valid = pcall (server.check_ticket, self, self.pending)
+      if not valid then
+        cancel_journal_ticket (self, self.pending, "Session controller disappeared before dispatch")
+      end
+    end
     server.publish (self)
   end)
   endpoint:connect ("parameter", function (_, pod, received_us) request (self, pod, received_us) end)
@@ -220,7 +349,12 @@ function server.new (endpoint, instance, request_handler, fault_handler)
     server.reject (self, nil, -22, error)
   end)
   endpoint:connect ("state-changed", function (_, state, error)
-    if state < 1 then self.fault ("Session control transport lost: " .. error) end
+    if state < 1 then
+      if self.pending and self.pending.journaled and not self.pending.dispatched then
+        cancel_journal_ticket (self, self.pending, "Session transport lost before dispatch")
+      end
+      self.fault ("Session control transport lost: " .. error)
+    end
   end)
   self.manager:activate ()
   server.publish (self)

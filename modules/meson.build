@@ -16,6 +16,15 @@ shared_library(
   dependencies : [wp_dep, pipewire_dep],
 )
 
+sqlite3_dep = dependency('sqlite3', version: '>= 3.24')
+shared_library(
+  'wireplumber-module-ao-journal',
+  [ 'module-ao-journal.c' ],
+  install : true,
+  install_dir : wireplumber_module_dir,
+  dependencies : [wp_dep, pipewire_dep, sqlite3_dep],
+)
+
 dbus_connection_enums = gnome.mkenums_simple('dbus-connection-enums',
   sources: [ 'dbus-connection-state.h' ],
 )

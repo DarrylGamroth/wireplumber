@@ -46,3 +46,10 @@ test(
       dependencies: common_deps),
   env: common_env,
 )
+
+test(
+  'test-ao-journal',
+  executable('test-ao-journal', 'ao-journal.c',
+    dependencies: common_deps + [sqlite3_dep]),
+  env: common_env,
+)

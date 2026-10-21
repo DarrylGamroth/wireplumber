@@ -100,3 +100,10 @@ test(
   args: ['lua-api-tests', 'ao-acquisition.lua'],
   env: common_env,
 )
+
+test(
+  'test-lua-ao-session-journal',
+  script_tester,
+  args: ['lua-api-tests', 'ao-session-journal.lua'],
+  env: common_env,
+)
