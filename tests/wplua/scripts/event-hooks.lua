@@ -29,6 +29,59 @@ local common_interests = {
   },
 }
 
+local property_events_seen = 0
+
+local function check_property_event (event, expected)
+  local properties = event:get_properties ():parse ()
+  assert (properties ["custom.test-property"] == expected)
+  property_events_seen = property_events_seen + 1
+  if property_events_seen == 3 then
+    Script:finish_activation ()
+  end
+end
+
+SimpleEventHook {
+  name = "test-table-event-properties",
+  interests = {
+    EventInterest {
+      Constraint { "event.type", "=", "test-table-properties" },
+      Constraint { "custom.test-property", "=", "table-value" },
+    },
+  },
+  execute = function (event)
+    check_property_event (event, "table-value")
+  end,
+}:register ()
+
+SimpleEventHook {
+  name = "test-wp-properties-event-properties",
+  interests = {
+    EventInterest {
+      Constraint { "event.type", "=", "test-wp-properties" },
+      Constraint { "custom.test-property", "=", "properties-value" },
+    },
+  },
+  execute = function (event)
+    check_property_event (event, "properties-value")
+  end,
+}:register ()
+
+SimpleEventHook {
+  name = "test-omitted-event-properties",
+  interests = {
+    EventInterest {
+      Constraint { "event.type", "=", "test-omitted-properties" },
+    },
+  },
+  execute = function (event)
+    assert (event:get_properties ():parse () ["custom.test-property"] == nil)
+    property_events_seen = property_events_seen + 1
+    if property_events_seen == 3 then
+      Script:finish_activation ()
+    end
+  end,
+}:register ()
+
 AsyncEventHook {
   name = "test-async-hook",
   before = "test-last-hook" ,
@@ -97,7 +150,20 @@ SimpleEventHook {
   execute = function (event)
     checkpoint("simple-last")
     check_results()
-    Script:finish_activation()
+    EventDispatcher.push_event {
+      type = "test-table-properties",
+      priority = 1,
+      properties = { ["custom.test-property"] = "table-value" },
+    }
+    EventDispatcher.push_event {
+      type = "test-wp-properties",
+      priority = 1,
+      properties = Properties { ["custom.test-property"] = "properties-value" },
+    }
+    EventDispatcher.push_event {
+      type = "test-omitted-properties",
+      priority = 1,
+    }
   end
 }:register()
 

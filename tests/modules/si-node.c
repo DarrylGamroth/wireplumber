@@ -150,6 +150,22 @@ test_si_node_configure_activate (TestFixture * f, gconstpointer user_data)
     g_assert_cmpuint (node_id, ==, wp_proxy_get_bound_id (WP_PROXY (node)));
     g_assert_cmpuint (channel, ==, 0);
 
+    /* Exact contexts select the already resolved global ID, never an index. */
+    const gchar *direction = data->expected_direction == WP_DIRECTION_INPUT ? "input" : "output";
+    const gchar *opposite = data->expected_direction == WP_DIRECTION_INPUT ? "output" : "input";
+    g_autofree gchar *context = g_strdup_printf ("%s:%u", direction, port_id);
+    g_autoptr (GVariant) exact = wp_si_linkable_get_ports (WP_SI_LINKABLE (item), context);
+    g_assert_true (g_variant_equal (v, exact));
+    g_autofree gchar *wrong_direction = g_strdup_printf ("%s:%u", opposite, port_id);
+    const gchar *invalid[] = { wrong_direction, "input:", "output:",
+      "input:-1", "output:+1", "input: 1", "output:1 ", "input:0x1",
+      "output:4294967296", "input:99999999999999999999999999999", "output:1junk",
+      "input:4294967295", "output:4294967295" };
+    for (guint i = 0; i < G_N_ELEMENTS (invalid); i++) {
+      g_autoptr (GVariant) empty = wp_si_linkable_get_ports (WP_SI_LINKABLE (item), invalid[i]);
+      g_assert_cmpuint (g_variant_n_children (empty), ==, 0);
+    }
+
     {
       g_autoptr (WpIterator) it = wp_node_new_ports_iterator (node);
       g_auto (GValue) val = G_VALUE_INIT;

@@ -172,6 +172,11 @@ wp_si_linkable_default_init (WpSiLinkableInterface * iface)
  *   - "reverse": get the reverse direction ports, if this item controls a
  *                filter node, which would have ports on both directions
  *
+ * The generic si-node implementation also supports "input", "output" and
+ * "input:<id>" / "output:<id>", where <id> is a decimal global port ID.
+ * Exact contexts return at most one port belonging to the wrapped node in the
+ * specified direction; malformed, missing or foreign IDs return an empty array.
+ *
  * Contexts other than NULL may only be used internally to ease the
  * implementation of more complex item relationships. For example, a
  * WpSessionItem that is in control of an input (sink) adapter node may
@@ -250,9 +255,30 @@ wp_si_link_default_get_properties (WpSiLink * self)
 }
 
 static void
+wp_si_link_default_withdraw (WpSiLink * self, GCancellable * cancellable,
+    GAsyncReadyCallback callback, gpointer data)
+{
+  g_autoptr (GTask) task = g_task_new (self, cancellable, callback, data);
+  g_task_set_source_tag (task, wp_si_link_withdraw);
+  g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+      "This session item does not support asynchronous link withdrawal");
+}
+
+static gboolean
+wp_si_link_default_withdraw_finish (WpSiLink * self, GAsyncResult * res,
+    GError ** error)
+{
+  g_return_val_if_fail (g_task_is_valid (res, self), FALSE);
+  g_return_val_if_fail (g_async_result_is_tagged (res, wp_si_link_withdraw), FALSE);
+  return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
 wp_si_link_default_init (WpSiLinkInterface * iface)
 {
   iface->get_properties = wp_si_link_default_get_properties;
+  iface->withdraw = wp_si_link_default_withdraw;
+  iface->withdraw_finish = wp_si_link_default_withdraw_finish;
 
   g_signal_new ("link-properties-changed", G_TYPE_FROM_INTERFACE (iface),
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -322,6 +348,44 @@ wp_si_link_get_in_item (WpSiLink * self)
   g_return_val_if_fail (WP_SI_LINK_GET_IFACE (self)->get_in_item, NULL);
 
   return WP_SI_LINK_GET_IFACE (self)->get_in_item (self);
+}
+
+/*!
+ * \brief Permanently retires the current link generation asynchronously.
+ *
+ * Success means all underlying activation callbacks have retired and every
+ * child proxy has been destroyed locally. Callers must still synchronize their
+ * Core and verify registry absence when remote absence is required. Cancelling
+ * the request never reopens the retired generation. Unsupported implementations
+ * return G_IO_ERROR_NOT_SUPPORTED; synchronous reset is not a substitute.
+ *
+ * \ingroup wpsiinterfaces
+ * \param self the session item
+ * \param cancellable (nullable): optional cancellable for the result
+ * \param callback (scope async)(closure data): completion callback
+ * \param data callback data
+ */
+void
+wp_si_link_withdraw (WpSiLink * self, GCancellable * cancellable,
+    GAsyncReadyCallback callback, gpointer data)
+{
+  g_return_if_fail (WP_IS_SI_LINK (self));
+  WP_SI_LINK_GET_IFACE (self)->withdraw (self, cancellable, callback, data);
+}
+
+/*!
+ * \brief Finishes wp_si_link_withdraw().
+ * \ingroup wpsiinterfaces
+ * \param self the session item
+ * \param res the asynchronous result
+ * \param error (out)(optional): error return location
+ * \returns TRUE after retirement, FALSE on failure or cancellation
+ */
+gboolean
+wp_si_link_withdraw_finish (WpSiLink * self, GAsyncResult * res, GError ** error)
+{
+  g_return_val_if_fail (WP_IS_SI_LINK (self), FALSE);
+  return WP_SI_LINK_GET_IFACE (self)->withdraw_finish (self, res, error);
 }
 
 /*!

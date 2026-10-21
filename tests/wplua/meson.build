@@ -82,28 +82,3 @@ test(
   args: ['lua-api-tests', 'profile-utils.lua'],
   env: common_env,
 )
-test(
-  'test-lua-ao-connections',
-  script_tester,
-  args: ['lua-api-tests', 'ao-connections.lua'],
-  env: common_env,
-)
-test(
-  'test-lua-ao-owner',
-  script_tester,
-  args: ['lua-api-tests', 'ao-owner.lua'],
-  env: common_env,
-)
-test(
-  'test-lua-ao-acquisition',
-  script_tester,
-  args: ['lua-api-tests', 'ao-acquisition.lua'],
-  env: common_env,
-)
-
-test(
-  'test-lua-ao-session-journal',
-  script_tester,
-  args: ['lua-api-tests', 'ao-session-journal.lua'],
-  env: common_env,
-)

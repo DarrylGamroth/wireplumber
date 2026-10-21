@@ -1539,8 +1539,36 @@ session_item_get_property (lua_State *L)
   return 1;
 }
 
+static void
+session_item_withdraw_done (GObject * item, GAsyncResult * res, GClosure * closure)
+{
+  g_autoptr (GError) error = NULL;
+  GValue values[2] = { G_VALUE_INIT, G_VALUE_INIT };
+  wp_si_link_withdraw_finish (WP_SI_LINK (item), res, &error);
+  g_value_init_from_instance (&values[0], item);
+  g_value_init (&values[1], G_TYPE_STRING);
+  g_value_set_string (&values[1], error ? error->message : NULL);
+  g_closure_invoke (closure, NULL, 2, values, NULL);
+  g_value_unset (&values[0]);
+  g_value_unset (&values[1]);
+  g_closure_invalidate (closure);
+  g_closure_unref (closure);
+}
+
+static int
+session_item_withdraw (lua_State *L)
+{
+  WpSiLink *item = wplua_checkobject (L, 1, WP_TYPE_SI_LINK);
+  GClosure *closure = wplua_checkclosure (L, 2);
+  g_closure_sink (g_closure_ref (closure));
+  wp_si_link_withdraw (item, NULL,
+      (GAsyncReadyCallback) session_item_withdraw_done, closure);
+  return 0;
+}
+
 static const luaL_Reg session_item_methods[] = {
   { "get_associated_proxy", session_item_get_associated_proxy },
+  { "withdraw", session_item_withdraw },
   { "reset", session_item_reset },
   { "configure", session_item_configure },
   { "register", session_item_register },
@@ -2719,6 +2747,7 @@ event_dispatcher_push_event (lua_State *L)
     lua_pop (L, 1);
 
     lua_pushliteral (L, "properties");
+    lua_gettable (L, 1);
     if (lua_istable (L, -1))
       properties = wplua_table_to_properties (L, -1);
     else if (!lua_isnil (L, -1) && !lua_isnone (L, -1) && !lua_isstring (L, -1))
