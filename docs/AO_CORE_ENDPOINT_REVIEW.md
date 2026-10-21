@@ -1,5 +1,8 @@
 # Declared core-hosted endpoints — 2026-10-08
 
+Historical review of the former runtime fork. Current runtime and build
+integration are described in [packaging/pipewireao](../packaging/pipewireao/README.md).
+
 Baseline: `6557dcea`, clean `master`. Remediation worktree:
 `wireplumber-core-endpoints`, branch `codex/core-owned-endpoints-20261008`.
 

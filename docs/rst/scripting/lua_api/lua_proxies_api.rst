@@ -341,3 +341,4 @@ contain the following methods:
    :param string key: *(optional)* the key to set
    :param string type: *(optional)* the type of the value; nil means "string"
    :param string value: *(optional)* the value to set
+

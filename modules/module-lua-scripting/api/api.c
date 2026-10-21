@@ -2689,7 +2689,6 @@ event_dispatcher_push_event (lua_State *L)
     lua_pop (L, 1);
 
     lua_pushliteral (L, "properties");
-    lua_gettable (L, 1);
     if (lua_istable (L, -1))
       properties = wplua_table_to_properties (L, -1);
     else if (!lua_isnil (L, -1) && !lua_isnone (L, -1) && !lua_isstring (L, -1))

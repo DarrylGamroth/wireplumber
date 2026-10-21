@@ -1,5 +1,8 @@
 # Final bounded WirePlumber adoption review
 
+Historical review of the former runtime fork. Current runtime and build
+integration are described in [packaging/pipewireao](../packaging/pipewireao/README.md).
+
 Date: 2026-10-09. Independent reviewer: Astra (`gpt-6-astra`).
 Preferred implementation model acknowledged: Sol (`gpt-6.1-sol`).
 

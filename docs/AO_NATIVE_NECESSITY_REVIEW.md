@@ -1,5 +1,8 @@
 # Native support for the AO Lua session policy
 
+Historical review of the former runtime fork. Current runtime and build
+integration are described in [packaging/pipewireao](../packaging/pipewireao/README.md).
+
 Review date: 2026-10-07. Source revision: `9e33913893fac11351570bf4c333d8aeb576ab06`.
 Compared with its parent `4c2648fa`; “existing” below refers to that source baseline,
 not an assertion about later upstream releases.
