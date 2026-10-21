@@ -40,7 +40,8 @@ Parallel work defaults to two jobs and is bounded at sixteen.
 By default Meson fetches the bundled Lua source through upstream's checksummed
 wrap. To avoid downloads, pass `--lua-source /path/to/lua-5.5.0`, using a prepared
 source tree that includes its Meson build files. This selects
-`--wrap-mode=nodownload` and records a digest of the supplied tree.
+`--wrap-mode=nodownload` and records a digest of the copied Lua source tree,
+including files reached through directory symlinks in the supplied tree.
 
 The test command supplies `PIPEWIREAO_*` paths outside upstream's test files,
 using SDK pkg-config metadata, with `SDK/share/pipewire-ao` as the config fallback

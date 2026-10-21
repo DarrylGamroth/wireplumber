@@ -112,7 +112,7 @@ def main():
                     "meson_options": [f"--prefix={prefix}"] + OPTIONS +
                                      (["--wrap-mode=nodownload"] if lua else []),
                     "jobs": args.jobs, "lua_source": str(lua) if lua else None,
-                    "lua_source_sha256": tree_digest(lua) if lua else None,
+                    "lua_source_sha256": None,
                     "patches": [{"name": p, "sha256": digest(RECIPE / p)} for p in patches],
                     "tools": {tool: run([tool, "--version"], env)
                               for tool in ("git", "meson", "ninja", "pkg-config", "cc")}}
@@ -129,7 +129,9 @@ def main():
             run(["git", "apply", "--check", str(RECIPE / patch)], env, source)
             run(["git", "apply", str(RECIPE / patch)], env, source)
         if lua:
-            shutil.copytree(lua, source / "subprojects/lua-5.5.0")
+            copied_lua = source / "subprojects/lua-5.5.0"
+            shutil.copytree(lua, copied_lua)
+            manifest["lua_source_sha256"] = tree_digest(copied_lua)
         save(work, manifest)
         run(["meson", "setup", str(build), str(source)] + manifest["meson_options"], env)
         print("Configured pinned upstream source; compiling", flush=True)
