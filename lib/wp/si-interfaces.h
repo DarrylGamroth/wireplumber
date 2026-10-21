@@ -113,13 +113,8 @@ struct _WpSiLinkInterface
   WpSiLinkable * (*get_out_item) (WpSiLink * self);
   WpSiLinkable * (*get_in_item) (WpSiLink * self);
 
-  void (*withdraw) (WpSiLink * self, GCancellable * cancellable,
-      GAsyncReadyCallback callback, gpointer data);
-  gboolean (*withdraw_finish) (WpSiLink * self, GAsyncResult * res,
-      GError ** error);
-
   /*< private >*/
-  WP_PADDING(2)
+  WP_PADDING(4)
 };
 
 WP_API
@@ -133,14 +128,6 @@ WpSiLinkable * wp_si_link_get_out_item (WpSiLink * self);
 
 WP_API
 WpSiLinkable * wp_si_link_get_in_item (WpSiLink * self);
-
-WP_API
-void wp_si_link_withdraw (WpSiLink * self, GCancellable * cancellable,
-    GAsyncReadyCallback callback, gpointer data);
-
-WP_API
-gboolean wp_si_link_withdraw_finish (WpSiLink * self, GAsyncResult * res,
-    GError ** error);
 
 /*!
  * \brief The WpSiAcquisition GType

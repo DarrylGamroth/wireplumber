@@ -1327,23 +1327,6 @@ link_new (lua_State *L)
   return l ? 1 : 0;
 }
 
-static int
-link_get_format (lua_State *L)
-{
-  WpLink *link = wplua_checkobject (L, 1, WP_TYPE_LINK);
-  WpSpaPod *format = wp_link_get_format (link);
-  if (format)
-    wplua_pushboxed (L, WP_TYPE_SPA_POD, format);
-  else
-    lua_pushnil (L);
-  return 1;
-}
-
-static const luaL_Reg link_methods[] = {
-  { "get_format", link_get_format },
-  { NULL, NULL }
-};
-
 /* Client */
 
 static gboolean
@@ -1539,36 +1522,8 @@ session_item_get_property (lua_State *L)
   return 1;
 }
 
-static void
-session_item_withdraw_done (GObject * item, GAsyncResult * res, GClosure * closure)
-{
-  g_autoptr (GError) error = NULL;
-  GValue values[2] = { G_VALUE_INIT, G_VALUE_INIT };
-  wp_si_link_withdraw_finish (WP_SI_LINK (item), res, &error);
-  g_value_init_from_instance (&values[0], item);
-  g_value_init (&values[1], G_TYPE_STRING);
-  g_value_set_string (&values[1], error ? error->message : NULL);
-  g_closure_invoke (closure, NULL, 2, values, NULL);
-  g_value_unset (&values[0]);
-  g_value_unset (&values[1]);
-  g_closure_invalidate (closure);
-  g_closure_unref (closure);
-}
-
-static int
-session_item_withdraw (lua_State *L)
-{
-  WpSiLink *item = wplua_checkobject (L, 1, WP_TYPE_SI_LINK);
-  GClosure *closure = wplua_checkclosure (L, 2);
-  g_closure_sink (g_closure_ref (closure));
-  wp_si_link_withdraw (item, NULL,
-      (GAsyncReadyCallback) session_item_withdraw_done, closure);
-  return 0;
-}
-
 static const luaL_Reg session_item_methods[] = {
   { "get_associated_proxy", session_item_get_associated_proxy },
-  { "withdraw", session_item_withdraw },
   { "reset", session_item_reset },
   { "configure", session_item_configure },
   { "register", session_item_register },
@@ -3498,7 +3453,7 @@ wp_lua_scripting_api_init (lua_State *L)
   wplua_register_type_methods (L, WP_TYPE_PORT,
       NULL, port_methods);
   wplua_register_type_methods (L, WP_TYPE_LINK,
-      link_new, link_methods);
+      link_new, NULL);
   wplua_register_type_methods (L, WP_TYPE_CLIENT,
       NULL, client_methods);
   wplua_register_type_methods (L, WP_TYPE_SESSION_ITEM,

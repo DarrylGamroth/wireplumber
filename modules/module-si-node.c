@@ -169,8 +169,7 @@ si_node_get_ports (WpSiLinkable * item, const gchar * context)
   g_autoptr (WpIterator) it = NULL;
   g_auto (GValue) val = G_VALUE_INIT;
   WpDirection direction;
-  guint32 node_id, selected_id = 0;
-  const gchar *selector = NULL;
+  guint32 node_id;
 
   if (!g_strcmp0 (context, "output")) {
     direction = WP_DIRECTION_OUTPUT;
@@ -178,35 +177,12 @@ si_node_get_ports (WpSiLinkable * item, const gchar * context)
   else if (!g_strcmp0 (context, "input")) {
     direction = WP_DIRECTION_INPUT;
   }
-  else if (context && g_str_has_prefix (context, "output:")) {
-    direction = WP_DIRECTION_OUTPUT;
-    selector = context + strlen ("output:");
-  }
-  else if (context && g_str_has_prefix (context, "input:")) {
-    direction = WP_DIRECTION_INPUT;
-    selector = context + strlen ("input:");
-  }
   else {
     /* on any other context, return an empty list of ports */
     return g_variant_new_array (G_VARIANT_TYPE ("(uuu)"), NULL, 0);
   }
 
-  if (selector) {
-    guint64 id;
-    if (!*selector)
-      return g_variant_new_array (G_VARIANT_TYPE ("(uuu)"), NULL, 0);
-    for (const gchar *c = selector; *c; c++) {
-      if (!g_ascii_isdigit (*c))
-        return g_variant_new_array (G_VARIANT_TYPE ("(uuu)"), NULL, 0);
-    }
-    if (!g_ascii_string_to_unsigned (selector, 10, 0, G_MAXUINT32, &id, NULL))
-      return g_variant_new_array (G_VARIANT_TYPE ("(uuu)"), NULL, 0);
-    selected_id = id;
-  }
-
   g_variant_builder_init (&b, G_VARIANT_TYPE ("a(uuu)"));
-  if (!self->node)
-    return g_variant_builder_end (&b);
   node_id = wp_proxy_get_bound_id (WP_PROXY (self->node));
 
   for (it = wp_node_new_ports_iterator (self->node);
@@ -222,12 +198,10 @@ si_node_get_ports (WpSiLinkable * item, const gchar * context)
       continue;
 
     port_id = wp_proxy_get_bound_id (WP_PROXY (port));
-    if (selector && port_id != selected_id)
-      continue;
     props = wp_pipewire_object_get_properties (WP_PIPEWIRE_OBJECT (port));
 
     /* skip control ports for now */
-    if (!selector && spa_atob (wp_properties_get (props, PW_KEY_PORT_CONTROL)))
+    if (spa_atob (wp_properties_get (props, PW_KEY_PORT_CONTROL)))
       continue;
 
     /* try to find the audio channel; if channel is NULL, this will silently

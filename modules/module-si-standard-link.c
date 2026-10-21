@@ -15,20 +15,6 @@ WP_DEFINE_LOCAL_LOG_TOPIC ("m-si-standard-link")
 
 #define SI_FACTORY_NAME "si-standard-link"
 
-/* Exact non-adapter generations have one child, but still own pending work
- * independently of the parent feature transition's lifetime. */
-struct link_generation {
-  GPtrArray *links;
-  GCancellable *cancellable;
-  WpTransition *transition;
-  GTask *withdraw_task;
-  GSource *retire_source;
-  guint pending;
-  gboolean retired;
-  gboolean retiring;
-  gboolean withdrawn;
-};
-
 struct _WpSiStandardLink
 {
   WpSessionItem parent;
@@ -39,8 +25,6 @@ struct _WpSiStandardLink
   const gchar *out_item_port_context;
   const gchar *in_item_port_context;
   gboolean passthrough;
-  gboolean exact;
-  struct link_generation *generation;
 
   /* activate */
   GPtrArray *node_links;
@@ -71,127 +55,10 @@ si_standard_link_init (WpSiStandardLink * self)
   g_weak_ref_init (&self->in_item, NULL);
 }
 
-static void retire_generation (WpSiStandardLink * self);
-
-static void
-generation_free (struct link_generation * generation)
-{
-  if (!generation)
-    return;
-  g_assert (generation->pending == 0);
-  g_assert (generation->withdraw_task == NULL);
-  g_assert (generation->retire_source == NULL);
-  g_clear_pointer (&generation->links, g_ptr_array_unref);
-  g_clear_object (&generation->cancellable);
-  g_clear_object (&generation->transition);
-  g_free (generation);
-}
-
-static void
-generation_maybe_complete (WpSiStandardLink * self)
-{
-  struct link_generation *g = self->generation;
-  if (!g || !g->retired || g->retiring || g->retire_source || g->pending)
-    return;
-
-  /* dispose() destroys even an unbound native proxy. A completed activation
-   * callback alone is not proof that its underlying factory effect is gone. */
-  for (guint i = 0; i < g->links->len; i++) {
-    WpProxy *proxy = g_ptr_array_index (g->links, i);
-    if (wp_proxy_get_pw_proxy (proxy))
-      return;
-  }
-  g_ptr_array_set_size (g->links, 0);
-  if (g->withdraw_task) {
-    g_autoptr (GTask) task = g_steal_pointer (&g->withdraw_task);
-    g_task_return_boolean (task, TRUE);
-  }
-}
-
-static gboolean
-dispose_generation_links (gpointer data)
-{
-  WpSiStandardLink *self = data;
-  struct link_generation *g = self->generation;
-  g->retiring = TRUE;
-  for (guint i = 0; i < g->links->len; i++) {
-    WpObject *child = g_ptr_array_index (g->links, i);
-    wp_object_abort_activation (child, "Link generation retired");
-    g_object_run_dispose (G_OBJECT (child));
-  }
-  g->retiring = FALSE;
-  return G_SOURCE_REMOVE;
-}
-
-static void
-retirement_source_destroy (gpointer data)
-{
-  WpSiStandardLink *self = data;
-  g_clear_pointer (&self->generation->retire_source, g_source_unref);
-  generation_maybe_complete (self);
-  g_object_unref (self);
-}
-
-static void
-retire_generation (WpSiStandardLink * self)
-{
-  struct link_generation *g = self->generation;
-  if (!g || g->retiring)
-    return;
-  if (g->retired && !g->pending && !g->links->len && !g->retire_source) {
-    generation_maybe_complete (self);
-    return;
-  }
-  g->retired = TRUE;
-  g->retiring = TRUE;
-  /* Fence first: abort may invoke the parent completion callback in sync. */
-  wp_object_abort_activation (WP_OBJECT (self), "Link generation retired");
-  g_cancellable_cancel (g->cancellable);
-  wp_object_update_features (WP_OBJECT (self), 0, WP_SESSION_ITEM_FEATURE_ACTIVE);
-  if (!g->retire_source) {
-    g_autoptr (WpCore) core = wp_object_get_core (WP_OBJECT (self));
-    /* Run after a currently executing child bind/INFO callback has unwound.
-     * Disposing from pw-proxy-created would let its bind step resume against
-     * a destroyed proxy. This source also retains the generation's owner. */
-    if (core)
-      wp_core_idle_add (core, &g->retire_source, dispose_generation_links,
-          g_object_ref (self), retirement_source_destroy);
-  }
-  g->retiring = FALSE;
-  generation_maybe_complete (self);
-}
-
-/* WpObject masks inactive feature bits before invoking deactivate(). Exact
- * generations must also retire work whose ACTIVE feature is still pending. */
-static void
-si_standard_link_deactivate (WpObject * object, WpObjectFeatures features)
-{
-  WpSiStandardLink *self = WP_SI_STANDARD_LINK (object);
-  if (self->generation)
-    retire_generation (self);
-  WP_OBJECT_CLASS (si_standard_link_parent_class)->deactivate (object, features);
-}
-
-static void
-si_standard_link_activate_execute_step (WpObject * object,
-    WpFeatureActivationTransition * transition, guint step,
-    WpObjectFeatures missing)
-{
-  WpSiStandardLink *self = WP_SI_STANDARD_LINK (object);
-  if (step == WP_TRANSITION_STEP_ERROR && self->generation)
-    retire_generation (self);
-  WP_OBJECT_CLASS (si_standard_link_parent_class)->activate_execute_step (
-      object, transition, step, missing);
-}
-
 static void
 si_standard_link_reset (WpSessionItem * item)
 {
   WpSiStandardLink *self = WP_SI_STANDARD_LINK (item);
-
-  /* Pending exact work must be fenced even when ACTIVE is not set yet. */
-  if (self->generation)
-    retire_generation (self);
 
   /* deactivate first */
   wp_object_deactivate (WP_OBJECT (self),
@@ -230,18 +97,8 @@ si_standard_link_configure (WpSessionItem * item, WpProperties * p)
   WpSessionItem *out_item, *in_item;
   const gchar *str;
 
-  /* Never replace ownership while callbacks can still reach this generation.
-   * Withdrawal permanently retires this item, even if its result is cancelled. */
-  if (self->generation && (!self->generation->retired ||
-          self->generation->pending || self->generation->retiring || self->generation->retire_source ||
-          self->generation->withdraw_task ||
-          self->generation->withdrawn))
-    return FALSE;
-
   /* reset previous config */
   si_standard_link_reset (item);
-  g_clear_pointer (&self->generation, generation_free);
-  self->exact = FALSE;
 
   out_item = get_and_validate_item (si_props, "out.item");
   if (!out_item)
@@ -254,29 +111,6 @@ si_standard_link_configure (WpSessionItem * item, WpProperties * p)
     return FALSE;
   wp_properties_setf (si_props, "in.item.id", "%u",
       wp_object_get_id (WP_OBJECT (in_item)));
-
-  str = wp_properties_get (si_props, "link.exact");
-  self->exact = str && pw_properties_parse_bool (str);
-  if (self->exact) {
-    /* A lingering server object can outlive an unbound local proxy. Exact
-     * withdrawal promises retirement, so reject that mode before creation. */
-    if (pw_properties_parse_bool (wp_properties_get (si_props, PW_KEY_OBJECT_LINGER)))
-      return FALSE;
-    if (WP_IS_SI_ADAPTER (out_item) || WP_IS_SI_ADAPTER (in_item) ||
-        wp_si_linkable_get_acquisition (WP_SI_LINKABLE (out_item)) ||
-        wp_si_linkable_get_acquisition (WP_SI_LINKABLE (in_item)))
-      return FALSE;
-    /* Endpoint identity belongs exclusively to the selected port tuples. */
-    const gchar *keys[] = { PW_KEY_LINK_OUTPUT_NODE, PW_KEY_LINK_OUTPUT_PORT,
-      PW_KEY_LINK_INPUT_NODE, PW_KEY_LINK_INPUT_PORT };
-    for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
-      if (wp_properties_get (si_props, keys[i]))
-        return FALSE;
-    }
-    self->generation = g_new0 (struct link_generation, 1);
-    self->generation->links = g_ptr_array_new_with_free_func (g_object_unref);
-    self->generation->cancellable = g_cancellable_new ();
-  }
 
   self->out_item_port_context = wp_properties_get (si_props,
       "out.item.port.context");
@@ -299,10 +133,6 @@ si_standard_link_configure (WpSessionItem * item, WpProperties * p)
 static gpointer
 si_standard_link_get_associated_proxy (WpSessionItem * item, GType proxy_type)
 {
-  WpSiStandardLink *self = WP_SI_STANDARD_LINK (item);
-  if (proxy_type == WP_TYPE_LINK && self->generation &&
-      self->generation->links->len == 1)
-    return g_object_ref (g_ptr_array_index (self->generation->links, 0));
   return NULL;
 }
 
@@ -334,11 +164,6 @@ si_standard_link_disable_active (WpSessionItem *si)
   g_autoptr (WpSessionItem) si_out = g_weak_ref_get (&self->out_item);
   g_autoptr (WpSessionItem) si_in = g_weak_ref_get (&self->in_item);
   WpSiAcquisition *out_acquisition, *in_acquisition;
-
-  if (self->generation) {
-    retire_generation (self);
-    return;
-  }
 
   if (si_out) {
     out_acquisition = wp_si_linkable_get_acquisition (
@@ -409,43 +234,6 @@ on_link_state_changed (WpLink *link, WpLinkState old_state,
   }
 }
 
-static void
-on_generation_activation_completed (WpTransition * transition, GParamSpec * pspec,
-    WpSiStandardLink * self)
-{
-  if (self->generation && self->generation->transition == transition)
-    g_clear_object (&self->generation->transition);
-}
-
-static void
-on_exact_link_activated (WpObject * proxy, GAsyncResult * res,
-    WpSiStandardLink * self)
-{
-  struct link_generation *g = self->generation;
-  g_autoptr (GError) error = NULL;
-  gboolean success = wp_object_activate_finish (proxy, res, &error);
-  g_assert (g && g->pending > 0);
-
-  if (g->retired) {
-    /* The retained retirement source destroys the proxy after this native
-     * callback unwinds; cancellation alone is not destruction evidence. */
-    g->pending--;
-    generation_maybe_complete (self);
-  } else {
-    g->pending--;
-    if (!success) {
-      if (g->transition && !wp_transition_get_completed (g->transition))
-        wp_transition_return_error (g->transition, g_steal_pointer (&error));
-      retire_generation (self);
-    } else if (g->transition && !wp_transition_get_completed (g->transition)) {
-      wp_object_update_features (WP_OBJECT (self), WP_SESSION_ITEM_FEATURE_ACTIVE, 0);
-    } else {
-      retire_generation (self);
-    }
-  }
-  g_object_unref (self);
-}
-
 struct port
 {
   guint32 node_id;
@@ -453,44 +241,6 @@ struct port
   guint32 channel;
   gboolean visited;
 };
-
-static gboolean
-create_node_link (WpSiStandardLink * self, WpTransition * transition,
-    const struct port * out, const struct port * in)
-{
-  g_autoptr (WpCore) core = wp_object_get_core (WP_OBJECT (self));
-  g_autoptr (WpProperties) item_props =
-      wp_session_item_get_properties (WP_SESSION_ITEM (self));
-  WpProperties *props = wp_properties_new_empty ();
-  const gchar *keys[] = { PW_KEY_LINK_PASSIVE, PW_KEY_OBJECT_PATH, PW_KEY_OBJECT_LINGER };
-  for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
-    const gchar *value = wp_properties_get (item_props, keys[i]);
-    if (value)
-      wp_properties_set (props, keys[i], value);
-  }
-  wp_properties_setf (props, PW_KEY_LINK_OUTPUT_NODE, "%u", out->node_id);
-  wp_properties_setf (props, PW_KEY_LINK_OUTPUT_PORT, "%u", out->port_id);
-  wp_properties_setf (props, PW_KEY_LINK_INPUT_NODE, "%u", in->node_id);
-  wp_properties_setf (props, PW_KEY_LINK_INPUT_PORT, "%u", in->port_id);
-  WpLink *link = wp_link_new_from_factory (core, "link-factory", props);
-  if (!link)
-    return FALSE;
-
-  g_signal_connect_object (link, "state-changed",
-      G_CALLBACK (on_link_state_changed), self, 0);
-  if (self->generation) {
-    struct link_generation *g = self->generation;
-    g_ptr_array_add (g->links, link);
-    g->pending++;
-    wp_object_activate (WP_OBJECT (link), WP_OBJECT_FEATURES_ALL, g->cancellable,
-        (GAsyncReadyCallback) on_exact_link_activated, g_object_ref (self));
-  } else {
-    g_ptr_array_add (self->node_links, link);
-    wp_object_activate_closure (WP_OBJECT (link), WP_OBJECT_FEATURES_ALL, NULL,
-        g_cclosure_new_object ((GCallback) on_link_activated, G_OBJECT (transition)));
-  }
-  return TRUE;
-}
 
 static inline bool
 channel_is_aux(guint32 channel)
@@ -532,6 +282,7 @@ static gboolean
 create_links (WpSiStandardLink * self, WpTransition * transition,
     GVariant * out_ports, GVariant * in_ports)
 {
+  g_autoptr (WpCore) core = wp_object_get_core (WP_OBJECT (self));
   g_autoptr (GArray) in_ports_arr = NULL;
   struct port out_port = {0};
   struct port *in_port;
@@ -552,17 +303,6 @@ create_links (WpSiStandardLink * self, WpTransition * transition,
     return FALSE;
   if (!g_variant_is_of_type (in_ports, G_VARIANT_TYPE("a(uuu)")))
     return FALSE;
-
-  if (self->exact) {
-    struct port in = { 0 };
-    if (!self->generation || self->generation->retired ||
-        g_variant_n_children (out_ports) != 1 || g_variant_n_children (in_ports) != 1)
-      return FALSE;
-    g_variant_get_child (out_ports, 0, "(uuu)", &out_port.node_id,
-        &out_port.port_id, &out_port.channel);
-    g_variant_get_child (in_ports, 0, "(uuu)", &in.node_id, &in.port_id, &in.channel);
-    return create_node_link (self, transition, &out_port, &in);
-  }
 
   i = g_variant_n_children (in_ports);
   if (i == 0)
@@ -589,6 +329,8 @@ create_links (WpSiStandardLink * self, WpTransition * transition,
   {
     int best_score = 0;
     struct port *best_port = NULL;
+    WpProperties *props = NULL;
+    WpLink *link;
 
     for (i = 0; i < in_ports_arr->len - 1; i++) {
       in_port = &g_array_index (in_ports_arr, struct port, i);
@@ -605,15 +347,31 @@ create_links (WpSiStandardLink * self, WpTransition * transition,
 
     best_port->visited = TRUE;
 
+    /* Create the properties */
+    props = wp_properties_new_empty ();
+    wp_properties_setf (props, PW_KEY_LINK_OUTPUT_NODE, "%u", out_port.node_id);
+    wp_properties_setf (props, PW_KEY_LINK_OUTPUT_PORT, "%u", out_port.port_id);
+    wp_properties_setf (props, PW_KEY_LINK_INPUT_NODE, "%u", best_port->node_id);
+    wp_properties_setf (props, PW_KEY_LINK_INPUT_PORT, "%u", best_port->port_id);
+
     wp_debug_object (self, "create pw link: %u:%u (%s) -> %u:%u (%s)",
         out_port.node_id, out_port.port_id,
         spa_debug_type_find_name (spa_type_audio_channel, out_port.channel),
         best_port->node_id, best_port->port_id,
         spa_debug_type_find_name (spa_type_audio_channel, best_port->channel));
-    if (!create_node_link (self, transition, &out_port, best_port)) {
-      g_variant_iter_free (iter);
-      return FALSE;
-    }
+
+    /* create the link */
+    link = wp_link_new_from_factory (core, "link-factory", props);
+    g_ptr_array_add (self->node_links, link);
+
+    /* activate to ensure it is created without errors */
+    wp_object_activate_closure (WP_OBJECT (link),
+        WP_OBJECT_FEATURES_ALL, NULL,
+        g_cclosure_new_object (
+            (GCallback) on_link_activated, G_OBJECT (transition)));
+
+    g_signal_connect_object (link, "state-changed",
+      G_CALLBACK (on_link_state_changed), self, 0);
   }
   g_variant_iter_free (iter);
   return self->node_links->len > 0;
@@ -905,17 +663,6 @@ si_standard_link_enable_active (WpSessionItem *si, WpTransition *transition)
   g_autoptr (WpSessionItem) si_in = NULL;
   WpSiAcquisition *out_acquisition = NULL, *in_acquisition = NULL;
 
-  if (self->generation && self->generation->retired) {
-    wp_transition_return_error (transition, g_error_new (G_IO_ERROR,
-        G_IO_ERROR_CLOSED, "si-standard-link: link generation is retired"));
-    return;
-  }
-  if (self->generation) {
-    self->generation->transition = g_object_ref (transition);
-    g_signal_connect_object (transition, "notify::completed",
-        G_CALLBACK (on_generation_activation_completed), self, 0);
-  }
-
   if (!wp_session_item_is_configured (si)) {
     wp_transition_return_error (transition,
         g_error_new (WP_DOMAIN_LIBRARY, WP_LIBRARY_ERROR_INVARIANT,
@@ -961,36 +708,12 @@ si_standard_link_enable_active (WpSessionItem *si, WpTransition *transition)
 }
 
 static void
-si_standard_link_withdraw (WpSiLink * item, GCancellable * cancellable,
-    GAsyncReadyCallback callback, gpointer data)
-{
-  WpSiStandardLink *self = WP_SI_STANDARD_LINK (item);
-  g_autoptr (GTask) task = g_task_new (self, cancellable, callback, data);
-  g_task_set_source_tag (task, wp_si_link_withdraw);
-  if (!self->generation) {
-    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-        "Asynchronous withdrawal requires link.exact non-adapter mode");
-    return;
-  }
-  struct link_generation *g = self->generation;
-  if (g->withdraw_task) {
-    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_PENDING,
-        "Link withdrawal is already pending");
-    return;
-  }
-  g->withdrawn = TRUE;
-  g->withdraw_task = g_steal_pointer (&task);
-  retire_generation (self);
-}
-
-static void
 si_standard_link_finalize (GObject * object)
 {
   WpSiStandardLink *self = WP_SI_STANDARD_LINK (object);
 
   g_weak_ref_clear (&self->out_item);
   g_weak_ref_clear (&self->in_item);
-  g_clear_pointer (&self->generation, generation_free);
 
   G_OBJECT_CLASS (si_standard_link_parent_class)->finalize (object);
 }
@@ -999,12 +722,9 @@ static void
 si_standard_link_class_init (WpSiStandardLinkClass * klass)
 {
   GObjectClass *object_class = (GObjectClass *) klass;
-  WpObjectClass *wpobject_class = (WpObjectClass *) klass;
   WpSessionItemClass *si_class = (WpSessionItemClass *) klass;
 
   object_class->finalize = si_standard_link_finalize;
-  wpobject_class->deactivate = si_standard_link_deactivate;
-  wpobject_class->activate_execute_step = si_standard_link_activate_execute_step;
 
   si_class->reset = si_standard_link_reset;
   si_class->configure = si_standard_link_configure;
@@ -1042,7 +762,6 @@ si_standard_link_get_in_item (WpSiLink * item)
 static void
 si_standard_link_link_init (WpSiLinkInterface * iface)
 {
-  iface->withdraw = si_standard_link_withdraw;
   iface->get_registration_info = si_standard_link_get_registration_info;
   iface->get_out_item = si_standard_link_get_out_item;
   iface->get_in_item = si_standard_link_get_in_item;

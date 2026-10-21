@@ -40,25 +40,3 @@ contain the following methods:
    Binds :c:func:`wp_session_item_remove`
 
    :param self: the session item
-
-.. function:: SessionItem.withdraw(self, callback)
-
-   Binds :c:func:`wp_si_link_withdraw` on items implementing ``WpSiLink``.
-   The callback receives ``(item, error)``; ``error`` is nil on success.
-   This method has no immediate return value.
-
-   Successful withdrawal proves that child activation callbacks have retired
-   and their native proxies have been destroyed. It does not prove remote
-   registry absence. Synchronize the manager Core and check the correlated
-   registry objects when that proof is required. Cancellation and failure never
-   reopen the withdrawn generation.
-
-   ``si-standard-link`` implements this operation for ``link.exact`` mode with
-   non-adapter linkables that have no acquisition interface and non-lingering
-   children. Exact configuration rejects ``object.linger = true``. The item remains
-   retired after withdrawal; create a fresh item for a new link. Other modes
-   report an unsupported-operation error rather than treating synchronous
-   deactivation as completed withdrawal.
-
-   :param self: the link session item
-   :param function callback: asynchronous completion callback
